@@ -13,6 +13,7 @@ TRAINEDDATA_PATH = ROOT / "traineddata"
 TRAINING_FILES_PATH = ROOT / "training_files"
 STAGING_AREA = ROOT / "stage"
 OUTPUT_PATH = ROOT / "output"
+PRETRAINED_MODEL_EXTRACTION_PATH = STAGING_AREA / "extracted_pretrained_model"
 FONTS_PATH = TRAINING_FILES_PATH / "fonts"
 TEXT_CORPUS_PATH = TRAINING_FILES_PATH / "text_corpus"
 GENERATED_IMAGES_PLUS_TEXT_PATH = STAGING_AREA / "text_plus_images"
@@ -26,10 +27,11 @@ def extract(c):
     traineddata_files = TRAINEDDATA_PATH.glob("*.traineddata")
     for data_file in traineddata_files:
         print(f"Extracting model components from {data_file}")
-        extraction_directory = TRAINEDDATA_PATH / (data_file.stem)
+        lang = data_file.stem
+        extraction_directory = PRETRAINED_MODEL_EXTRACTION_PATH / lang
         if extraction_directory.exists():
             shutil.rmtree(extraction_directory)
-        extraction_directory.mkdir()
+        extraction_directory.mkdir(parents=True, exist_ok=True)
         with c.cd(extraction_directory):
             c.run(
                 "combine_tessdata -u "
@@ -106,7 +108,7 @@ def train(c):
     checkpoints_dir = CHECKPOINT_OUTPUT_PATH / lang
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     pretrainned_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
-    pretrained_lstm = TRAINEDDATA_PATH / lang / f"{lang}.lstm"
+    pretrained_lstm = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.lstm"
     print(f"Training Tesseract for language: {lang}.")
     with c.cd(checkpoints_dir):
         c.run(

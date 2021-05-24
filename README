@@ -1,3 +1,19 @@
 # Tesseract Arabic Training
 
-Traing Tesseract Arabic model using python.
+Traing Tesseract Arabic model using invoke.
+
+## Usage
+
+The following commands are available:
+
+* invoke train: to start training
+* invoke done: to get a final .trainneddata model for use with tesseract to recognize text
+
+
+## Needed training files
+
+
+in the training_files folder we have two other folders:
+
+1. fonts: in which we put the fonts we want to add. The most important file in this folder is the fonts.txt file which contains the display names of the fonts
+2. text_corpus: in which we put the lines we want to train tesseract on. In this folder we can put any number of text files, and they will be used and split into lines automatically.
