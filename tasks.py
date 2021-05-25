@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import os
 import shutil
 from itertools import chain
 from concurrent.futures import ThreadPoolExecutor
@@ -46,7 +47,10 @@ def gen_images(c):
     output_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
     output_dir.mkdir(parents=True, exist_ok=True)
     fonts_dir = FONTS_PATH / lang
-    fontslist = [l.strip() for l in (fonts_dir / "fonts.txt").read_text().split("\n")]
+    fonts_list = [
+        line.strip()
+        for line in (fonts_dir / "fonts.txt").read_text().split("\n")
+    ]
     texts_dir = TEXT_CORPUS_PATH / lang
     text_files = texts_dir.glob("*.txt")
     text_lines = {
@@ -61,24 +65,43 @@ def gen_images(c):
         for (idx, line) in enumerate(lines):
             outfilename = output_dir / f"{filename}.{idx}.gt.txt"
             outfilename.write_text(line)
-    with TemporaryDirectory() as tempdir:
-        with c.cd(output_dir):
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                for txt_file in output_dir.glob("*.txt"):
-                    for idx, font in enumerate(fontslist):
-                        output_base = txt_file.stem.rstrip(".gt") + f".{idx}"
-                        executor.submit(
-                            c.run,
-                            "text2image "
-                            "--xsize 1400 --ysize 256 --margin 64 "
-                            f"--fontconfig_tmpdir {tempdir} "
-                            f"--fonts_dir {fonts_dir} "
-                            f"--text {txt_file} "
-                            f'--font "{font}" '
-                            f"--outputbase {output_base}"
-                        )
+    with TemporaryDirectory() as tempdir, c.cd(output_dir), ThreadPoolExecutor(max_workers=1) as executor:
+        for txt_file in output_dir.glob("*.txt"):
+            for fontname in fonts_list:
+                output_base = txt_file.stem.rstrip(".gt") + f".{idx}"
+                executor.submit(
+                    c.run,
+                    "text2image "
+                    "--xsize 2400 --ysize 512 "
+                    "--margin 64 --ptsize 32 "
+                    f"--fontconfig_tmpdir {tempdir} "
+                    f"--fonts_dir {fonts_dir} "
+                    f"--text {txt_file} "
+                    f'--font "{fontname}" '
+                    f"--outputbase {output_base}"
+                )
 
-@task(pre=(gen_images,))
+
+@task(pre=(extract, gen_images,))
+def box(c):
+    """Generate box files from tif images."""
+    lang = c['tesseract']['lang']
+    output_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
+    tif_files = output_dir.glob("*.tif")
+    with c.cd(output_dir), ThreadPoolExecutor() as executor:
+        for tif in tif_files:
+            box_filename = tif.with_suffix("")
+            cmd = " ".join([
+                f"tesseract --lang {lang}",
+                str(tif),
+                str(box_filename),
+                "lstmbox",
+            ])
+            executor.submit(c.run, cmd)
+
+
+
+@task(pre=())
 def lstmf(c):
     print("Generating lstmf files from images and box files...")
     lang = c['tesseract']['lang']
@@ -86,21 +109,26 @@ def lstmf(c):
     tif_files = image_dir.glob("*.tif")
     lstmf_dir = LSTMF_PATH / lang
     lstmf_dir.mkdir(parents=True, exist_ok=True)
-    with c.cd(lstmf_dir):
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            for tif in tif_files:
-                executor.submit(c.run, (
-                    f"tesseract {tif} "
-                   f"{ tif.stem } "
-                   "--psm 7 lstm.train"
-                ))
+    lang_config = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.config"
+    tessdata_environ = os.environ.copy()
+    tessdata_environ["TESSDATA_PREFIX"] = TRAINEDDATA_PATH
+    with c.cd(lstmf_dir), ThreadPoolExecutor(max_workers=8) as executor:
+        for tif in tif_files:
+            box_file = tif.with_suffix("")
+            cmd = " ".join([
+                f"tesseract {tif}",
+               f"{ box_file }",
+               "lstm.train lstmf",
+               f"{ lang_config } --psm 7",
+            ])
+            executor.submit(c.run, cmd, env=tessdata_environ)
     # Write a list of training files to the same folder
     lstmf_file_list = "\n".join(str(f.resolve()) for f in lstmf_dir.iterdir())
     with open(lstmf_dir / "training.files.txt", "w", newline="\n") as file:
         file.write(lstmf_file_list)
 
 
-@task(pre=(lstmf, extract))
+@task(pre=(lstmf,))
 def train(c):
     lang = c['tesseract']['lang']
     lstmf_dir = LSTMF_PATH / lang
