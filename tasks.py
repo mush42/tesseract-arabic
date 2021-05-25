@@ -64,7 +64,7 @@ def gen_images(c):
     }
     for (filename, lines) in text_lines.items():
         for (idx, line) in enumerate(lines):
-            outfilename = output_dir / f"{filename}.{idx}.gt.txt"
+            outfilename = output_dir / f"{lang}.{filename}.{idx}.gt.txt"
             outfilename.write_text(line)
     with TemporaryDirectory() as tempdir, c.cd(output_dir), ThreadPoolExecutor(max_workers=1) as executor:
         for txt_file in output_dir.glob("*.txt"):
@@ -93,13 +93,40 @@ def box(c):
         for tif in tif_files:
             box_filename = tif.with_suffix("")
             cmd = " ".join([
-                f"tesseract --lang {lang}",
+                f"tesseract --l {lang}",
                 str(tif),
                 str(box_filename),
                 "lstmbox",
             ])
             executor.submit(c.run, cmd)
 
+
+@task(pre=(extract, gen_images))
+def lstmf(c):
+    print("Generating lstmf files from images and box files...")
+    lang = c['tesseract']['lang']
+    image_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
+    tif_files = image_dir.glob("*.tif")
+    lstmf_dir = LSTMF_PATH / lang
+    lstmf_dir.mkdir(parents=True, exist_ok=True)
+    lang_config = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.config"
+    os.environ["TESSDATA_PREFIX"] = str(TRAINEDDATA_PATH)
+    with c.cd(image_dir), ThreadPoolExecutor(max_workers=8) as executor:
+        for tif in tif_files:
+            cmd = " ".join([
+                f"tesseract -l {lang} {tif.name}",
+               f"{ tif.stem }",
+               "lstm.train",
+               f"{lang_config}",
+            ])
+            executor.submit(c.run, cmd)
+    # Move .lstmf files to the lstmf_dir
+    for lstm_file in image_dir.glob("*.lstmf"):
+        shutil.move(lstm_file, lstmf_dir)
+    # Write a list of training files to the same folder
+    lstmf_file_list = "\n".join(str(f.resolve()) for f in lstmf_dir.iterdir())
+    with open(lstmf_dir / "training.files.txt", "w", newline="\n") as file:
+        file.write(lstmf_file_list)
 
 
 
@@ -116,26 +143,46 @@ def train(c):
     with c.cd(checkpoints_dir):
         c.run(
             "lstmtraining "
-            f"--model_output . "
+            f"--model_output {lang} "
             f"--continue_from {pretrained_lstm} "
             f"--traineddata {pretrainned_traineddata} "
             f"--train_listfile {training_files_list} "
-            "--max_iterations 400"
         )
 
 
 @task
-def done(c):
+def done(c, default_checkpoint=True):
     lang = c['tesseract']['lang']
-    checkpoints_dir = CHECKPOINT_OUTPUT_PATH / lang / "._checkpoint"
+    checkpoint_dir = CHECKPOINT_OUTPUT_PATH / lang
+    default_checkpoint_file =  checkpoint_dir / f"{lang}_checkpoint"
+    if default_checkpoint:
+        chk_files = checkpoint_dir.glob("*.checkpoint")
+        keys = {}
+        for ck in chk_files:
+            if ck.name.count("_") == 3:
+                nchars = float(ck.name.split("_")[1])
+                keys[nchars] = ck
+        if  keys:
+            checkpoint_file = keys[min(keys)] 
+        else:
+            checkpoint_file = default_checkpoint_file
+    else:
+        checkpoint_file = default_checkpoint_file
     output_model = OUTPUT_PATH / f"{lang}.traineddata"
     output_model.parent.mkdir(parents=True, exist_ok=True)
     pretrainned_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
     c.run(
         "lstmtraining --stop_training "
-        f"--continue_from {checkpoints_dir} "
+        f"--continue_from {checkpoint_file} "
         f"--traineddata {pretrainned_traineddata} "
         f"--model_output {output_model}"
     )
     print(f"Done creating the new language model.\nSaved the model as: {output_model}")
 
+
+@task
+def clean(c):
+    folders_to_remove = {STAGING_AREA, OUTPUT_PATH}
+    for folder in {fldr for fldr in folders_to_remove if fldr.exists()}:
+        print(f"Deleting folder: {folder.name}")
+        shutil.rmtree(folder)
