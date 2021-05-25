@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 from pathlib import Path
 from invoke import task
+from pathvalidate import sanitize_filename
 
 
 ROOT = Path.cwd()
@@ -68,7 +69,7 @@ def gen_images(c):
     with TemporaryDirectory() as tempdir, c.cd(output_dir), ThreadPoolExecutor(max_workers=1) as executor:
         for txt_file in output_dir.glob("*.txt"):
             for fontname in fonts_list:
-                output_base = txt_file.stem.rstrip(".gt") + f".{idx}"
+                output_base = txt_file.stem.rstrip(".gt") + sanitize_filename(fontname).replace(" ", "")
                 executor.submit(
                     c.run,
                     "text2image "
@@ -100,32 +101,6 @@ def box(c):
             executor.submit(c.run, cmd)
 
 
-
-@task(pre=())
-def lstmf(c):
-    print("Generating lstmf files from images and box files...")
-    lang = c['tesseract']['lang']
-    image_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
-    tif_files = image_dir.glob("*.tif")
-    lstmf_dir = LSTMF_PATH / lang
-    lstmf_dir.mkdir(parents=True, exist_ok=True)
-    lang_config = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.config"
-    tessdata_environ = os.environ.copy()
-    tessdata_environ["TESSDATA_PREFIX"] = TRAINEDDATA_PATH
-    with c.cd(lstmf_dir), ThreadPoolExecutor(max_workers=8) as executor:
-        for tif in tif_files:
-            box_file = tif.with_suffix("")
-            cmd = " ".join([
-                f"tesseract {tif}",
-               f"{ box_file }",
-               "lstm.train lstmf",
-               f"{ lang_config } --psm 7",
-            ])
-            executor.submit(c.run, cmd, env=tessdata_environ)
-    # Write a list of training files to the same folder
-    lstmf_file_list = "\n".join(str(f.resolve()) for f in lstmf_dir.iterdir())
-    with open(lstmf_dir / "training.files.txt", "w", newline="\n") as file:
-        file.write(lstmf_file_list)
 
 
 @task(pre=(lstmf,))
