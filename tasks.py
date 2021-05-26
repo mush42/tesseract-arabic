@@ -1,5 +1,6 @@
 # coding: utf-8
 
+import unicodedata
 import os
 import shutil
 from itertools import chain
@@ -15,12 +16,24 @@ TRAINEDDATA_PATH = ROOT / "traineddata"
 TRAINING_FILES_PATH = ROOT / "training_files"
 STAGING_AREA = ROOT / "stage"
 OUTPUT_PATH = ROOT / "output"
+LANGDATA_LSTM_PATH = TRAINEDDATA_PATH / "langdata_lstm"
 PRETRAINED_MODEL_EXTRACTION_PATH = STAGING_AREA / "extracted_pretrained_model"
+PROTO_MODEL_PATH = STAGING_AREA / "protomodel"
 FONTS_PATH = TRAINING_FILES_PATH / "fonts"
 TEXT_CORPUS_PATH = TRAINING_FILES_PATH / "text_corpus"
 GENERATED_IMAGES_PLUS_TEXT_PATH = STAGING_AREA / "text_plus_images"
 LSTMF_PATH = STAGING_AREA / "lstmf"
 CHECKPOINT_OUTPUT_PATH = STAGING_AREA / "model_output_checkpoints"
+
+
+@task
+def clean(c):
+    """Clean transient files."""
+    print("Cleaning transient files and folders...")
+    folders_to_remove = {STAGING_AREA, OUTPUT_PATH}
+    for folder in {fldr for fldr in folders_to_remove if fldr.exists()}:
+        print(f"Deleting folder: {folder.name}")
+        shutil.rmtree(folder)
 
 
 @task
@@ -65,7 +78,8 @@ def gen_images(c):
     for (filename, lines) in text_lines.items():
         for (idx, line) in enumerate(lines):
             outfilename = output_dir / f"{lang}.{filename}.{idx}.gt.txt"
-            outfilename.write_text(line)
+            text = unicodedata.normalize('NFC', line)
+            outfilename.write_text(text)
     with TemporaryDirectory() as tempdir, c.cd(output_dir), ThreadPoolExecutor(max_workers=1) as executor:
         for txt_file in output_dir.glob("*.txt"):
             for fontname in fonts_list:
@@ -129,16 +143,55 @@ def lstmf(c):
         file.write(lstmf_file_list)
 
 
+@task
+def proto(c):
+    """Generates proto model."""
+    lang = c['tesseract']['lang']
+    text_plus_images_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
+    extracted_model_directory = PRETRAINED_MODEL_EXTRACTION_PATH / lang
+    proto_model_dir = PROTO_MODEL_PATH / lang
+    proto_model_dir.mkdir(parents=True, exist_ok=True)
+    lang_langdata_lstm_dir = LANGDATA_LSTM_PATH / lang
+    # First generate unicharset file
+    box_files = " ".join(str(file) for file in text_plus_images_dir.glob("*.box"))
+    unicharset_file = proto_model_dir / f"{lang}.unicharset"
+    c.run(
+        "unicharset_extractor "
+        f"--output_unicharset { unicharset_file } "
+        "--norm_mode 3 "
+        f"{box_files} "
+    )
+    # Finally generate the starter trainneddata file
+    wordlist_file = lang_langdata_lstm_dir / f"{ lang }.wordlist"
+    numbers_file = lang_langdata_lstm_dir  / f"{lang}.numbers"
+    puncs_file = lang_langdata_lstm_dir  / f"{lang}.punc"
+    cmd_components = [
+        "combine_lang_model",
+        f"--lang {lang}",
+        f"--input_unicharset { unicharset_file }",
+        "--script_dir .",
+        f"--words {wordlist_file}",
+        f"--numbers {numbers_file}",
+        f"--puncs {puncs_file}",
+        f"--output_dir {proto_model_dir}",
+    ] 
+    if c['tesseract']['is_rtl']:
+        cmd_components.insert(1, "--lang_is_rtl")
+    with c.cd(LANGDATA_LSTM_PATH):
+        c.run(" ".join(cmd_components))
 
-@task(pre=(lstmf,))
+
+@task(pre=(clean, lstmf, proto))
 def train(c):
     lang = c['tesseract']['lang']
     lstmf_dir = LSTMF_PATH / lang
     training_files_list = lstmf_dir / "training.files.txt"
+    proto_model_dir = PROTO_MODEL_PATH / lang
     checkpoints_dir = CHECKPOINT_OUTPUT_PATH / lang
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
-    pretrainned_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
+    pretrainned_traineddata = proto_model_dir /  lang / f"{lang}.traineddata"
     pretrained_lstm = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.lstm"
+    old_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
     print(f"Training Tesseract for language: {lang}.")
     with c.cd(checkpoints_dir):
         c.run(
@@ -147,11 +200,12 @@ def train(c):
             f"--continue_from {pretrained_lstm} "
             f"--traineddata {pretrainned_traineddata} "
             f"--train_listfile {training_files_list} "
+            f"--old_traineddata {old_traineddata} "
         )
 
 
 @task
-def done(c, default_checkpoint=True):
+def done(c, default_checkpoint=True, fast_model=False):
     lang = c['tesseract']['lang']
     checkpoint_dir = CHECKPOINT_OUTPUT_PATH / lang
     default_checkpoint_file =  checkpoint_dir / f"{lang}_checkpoint"
@@ -170,19 +224,17 @@ def done(c, default_checkpoint=True):
         checkpoint_file = default_checkpoint_file
     output_model = OUTPUT_PATH / f"{lang}.traineddata"
     output_model.parent.mkdir(parents=True, exist_ok=True)
-    pretrainned_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
-    c.run(
-        "lstmtraining --stop_training "
-        f"--continue_from {checkpoint_file} "
-        f"--traineddata {pretrainned_traineddata} "
-        f"--model_output {output_model}"
-    )
+    pretrainned_traineddata = PROTO_MODEL_PATH / lang /  lang / f"{lang}.traineddata"
+    old_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
+    cmd = [
+        "lstmtraining --stop_training",
+        f"--continue_from {checkpoint_file}",
+        f"--traineddata {pretrainned_traineddata}",
+        f"--old_traineddata {old_traineddata} ",
+        f"--model_output {output_model}",
+    ]
+    if fast_model:
+        cmd.append("--convert_to_int")
+    c.run(" ".join(cmd))
     print(f"Done creating the new language model.\nSaved the model as: {output_model}")
 
-
-@task
-def clean(c):
-    folders_to_remove = {STAGING_AREA, OUTPUT_PATH}
-    for folder in {fldr for fldr in folders_to_remove if fldr.exists()}:
-        print(f"Deleting folder: {folder.name}")
-        shutil.rmtree(folder)
