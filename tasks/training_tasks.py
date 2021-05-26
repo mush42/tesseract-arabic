@@ -97,7 +97,7 @@ def gen_images(c):
                 )
 
 
-@task(pre=(extract, gen_images,))
+@task
 def box(c):
     """Generate box files from tif images."""
     lang = c['tesseract']['lang']
@@ -115,7 +115,19 @@ def box(c):
             executor.submit(c.run, cmd)
 
 
-@task(pre=(extract, gen_images))
+@task(name="lstmf-list")
+def write_lstmf_files_list(c):
+    """Write a .txt file with all the lstmf file names."""
+    lang = c['tesseract']['lang']
+    lstmf_dir = LSTMF_PATH / lang
+    lstmf_file_list = "\n".join(str(f.resolve()) for f in lstmf_dir.iterdir())
+    print(f"Writing the list of training files to: {lstmf_dir}...")
+    with open(lstmf_dir / "training.files.txt", "w", newline="\n") as file:
+        file.write(lstmf_file_list)
+
+
+
+@task
 def lstmf(c):
     print("Generating lstmf files from images and box files...")
     lang = c['tesseract']['lang']
@@ -123,7 +135,7 @@ def lstmf(c):
     tif_files = image_dir.glob("*.tif")
     lstmf_dir = LSTMF_PATH / lang
     lstmf_dir.mkdir(parents=True, exist_ok=True)
-    lang_config = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.config"
+    lang_config = LANGDATA_LSTM_PATH / lang / f"{lang}.config"
     os.environ["TESSDATA_PREFIX"] = str(TRAINEDDATA_PATH)
     with c.cd(image_dir), ThreadPoolExecutor(max_workers=8) as executor:
         for tif in tif_files:
@@ -137,10 +149,9 @@ def lstmf(c):
     # Move .lstmf files to the lstmf_dir
     for lstm_file in image_dir.glob("*.lstmf"):
         shutil.move(lstm_file, lstmf_dir)
-    # Write a list of training files to the same folder
-    lstmf_file_list = "\n".join(str(f.resolve()) for f in lstmf_dir.iterdir())
-    with open(lstmf_dir / "training.files.txt", "w", newline="\n") as file:
-        file.write(lstmf_file_list)
+
+
+
 
 
 @task
@@ -181,7 +192,7 @@ def proto(c):
         c.run(" ".join(cmd_components))
 
 
-@task(pre=(clean, lstmf, proto))
+@task
 def train(c):
     lang = c['tesseract']['lang']
     lstmf_dir = LSTMF_PATH / lang
@@ -190,26 +201,34 @@ def train(c):
     checkpoints_dir = CHECKPOINT_OUTPUT_PATH / lang
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     pretrainned_traineddata = proto_model_dir /  lang / f"{lang}.traineddata"
-    pretrained_lstm = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.lstm"
-    old_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
     print(f"Training Tesseract for language: {lang}.")
+    cmd = [
+        "lstmtraining",
+        f"--model_output {lang}",
+        f"--traineddata {pretrainned_traineddata}",
+        f"--train_listfile {training_files_list}",
+    ]
+    if not c["tesseract"]["new_model"]:
+        pretrained_lstm = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.lstm"
+        old_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
+        cmd.extend([
+            f"--continue_from {pretrained_lstm}",
+            f"--old_traineddata {old_traineddata}",
+        ])
+    else:
+        netspec_arg = '--net_spec "[1,1,0,48 Lbx256 O1c{unicharset_char_count}]"'
+        num_chars_in_unichar = next((proto_model_dir / lang).glob("*.txt")).name.split("=")[1].split(".")[0]
+        cmd.append(netspec_arg.format(unicharset_char_count=num_chars_in_unichar))
     with c.cd(checkpoints_dir):
-        c.run(
-            "lstmtraining "
-            f"--model_output {lang} "
-            f"--continue_from {pretrained_lstm} "
-            f"--traineddata {pretrainned_traineddata} "
-            f"--train_listfile {training_files_list} "
-            f"--old_traineddata {old_traineddata} "
-        )
+        c.run(" ".join(cmd))
 
 
 @task
-def done(c, default_checkpoint=True, fast_model=False):
+def done(c, default_checkpoint=False, fast_model=False):
     lang = c['tesseract']['lang']
     checkpoint_dir = CHECKPOINT_OUTPUT_PATH / lang
     default_checkpoint_file =  checkpoint_dir / f"{lang}_checkpoint"
-    if default_checkpoint:
+    if not default_checkpoint:
         chk_files = checkpoint_dir.glob("*.checkpoint")
         keys = {}
         for ck in chk_files:
@@ -225,14 +244,15 @@ def done(c, default_checkpoint=True, fast_model=False):
     output_model = OUTPUT_PATH / f"{lang}.traineddata"
     output_model.parent.mkdir(parents=True, exist_ok=True)
     pretrainned_traineddata = PROTO_MODEL_PATH / lang /  lang / f"{lang}.traineddata"
-    old_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
     cmd = [
         "lstmtraining --stop_training",
         f"--continue_from {checkpoint_file}",
         f"--traineddata {pretrainned_traineddata}",
-        f"--old_traineddata {old_traineddata} ",
         f"--model_output {output_model}",
     ]
+    if not c["tesseract"]["new_model"]:
+        old_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
+        cmd.append(        f"--old_traineddata {old_traineddata} ",)
     if fast_model:
         cmd.append("--convert_to_int")
     c.run(" ".join(cmd))

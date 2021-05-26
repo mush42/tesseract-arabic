@@ -1,3 +1,4 @@
 tesseract:
   lang: ara
   is_rtl: true
+  new_model: false
