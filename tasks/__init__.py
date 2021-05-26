@@ -20,3 +20,13 @@ ns.add_task(training_tasks.done)
 ])
 def train(c, *args, **kwargs):
     return training_tasks.train(c, *args, **kwargs)
+
+
+@ns.add_task
+@task(pre=[
+    training_tasks.extract,
+    training_tasks.write_lstmf_files_list,
+    training_tasks.proto,
+])
+def train_ready(c, *args, **kwargs):
+    return training_tasks.train(c, *args, **kwargs)
