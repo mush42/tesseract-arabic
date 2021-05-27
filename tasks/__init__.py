@@ -30,3 +30,9 @@ def train(c, *args, **kwargs):
 ])
 def train_ready(c, *args, **kwargs):
     return training_tasks.train(c, *args, **kwargs)
+
+
+@ns.add_task
+@task
+def cont_training(c, *args, **kwargs):
+    return training_tasks.train(c, cont=True)

@@ -193,7 +193,7 @@ def proto(c):
 
 
 @task
-def train(c):
+def train(c, cont=False):
     lang = c['tesseract']['lang']
     lstmf_dir = LSTMF_PATH / lang
     training_files_list = lstmf_dir / "training.files.txt"
@@ -201,6 +201,7 @@ def train(c):
     checkpoints_dir = CHECKPOINT_OUTPUT_PATH / lang
     checkpoints_dir.mkdir(parents=True, exist_ok=True)
     pretrainned_traineddata = proto_model_dir /  lang / f"{lang}.traineddata"
+    old_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
     print(f"Training Tesseract for language: {lang}.")
     cmd = [
         "lstmtraining",
@@ -208,9 +209,14 @@ def train(c):
         f"--traineddata {pretrainned_traineddata}",
         f"--train_listfile {training_files_list}",
     ]
-    if not c["tesseract"]["new_model"]:
+    if cont:
+        default_checkpoint_file =  checkpoints_dir / f"{lang}_checkpoint"
+        cmd.extend([
+            f"--continue_from {default_checkpoint_file}",
+            f"--old_traineddata {old_traineddata}",
+        ])
+    elif not c["tesseract"]["new_model"]:
         pretrained_lstm = PRETRAINED_MODEL_EXTRACTION_PATH / lang / f"{lang}.lstm"
-        old_traineddata = TRAINEDDATA_PATH / f"{lang}.traineddata"
         cmd.extend([
             f"--continue_from {pretrained_lstm}",
             f"--old_traineddata {old_traineddata}",
@@ -224,23 +230,10 @@ def train(c):
 
 
 @task
-def done(c, default_checkpoint=False, fast_model=False):
+def done(c, fast_model=False):
     lang = c['tesseract']['lang']
     checkpoint_dir = CHECKPOINT_OUTPUT_PATH / lang
-    default_checkpoint_file =  checkpoint_dir / f"{lang}_checkpoint"
-    if not default_checkpoint:
-        chk_files = checkpoint_dir.glob("*.checkpoint")
-        keys = {}
-        for ck in chk_files:
-            if ck.name.count("_") == 3:
-                nchars = float(ck.name.split("_")[1])
-                keys[nchars] = ck
-        if  keys:
-            checkpoint_file = keys[min(keys)] 
-        else:
-            checkpoint_file = default_checkpoint_file
-    else:
-        checkpoint_file = default_checkpoint_file
+    checkpoint_file =  checkpoint_dir / f"{lang}_checkpoint"
     output_model = OUTPUT_PATH / f"{lang}.traineddata"
     output_model.parent.mkdir(parents=True, exist_ok=True)
     pretrainned_traineddata = PROTO_MODEL_PATH / lang /  lang / f"{lang}.traineddata"
