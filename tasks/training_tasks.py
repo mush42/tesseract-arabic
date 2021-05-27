@@ -164,14 +164,27 @@ def proto(c):
     proto_model_dir.mkdir(parents=True, exist_ok=True)
     lang_langdata_lstm_dir = LANGDATA_LSTM_PATH / lang
     # First generate unicharset file
-    box_files = " ".join(str(file) for file in text_plus_images_dir.glob("*.box"))
+    box_files = text_plus_images_dir.glob("*.box")
     unicharset_file = proto_model_dir / f"{lang}.unicharset"
+    large_box_file = proto_model_dir / f"{lang}.box"
+    all_box_data = []
+    for file in box_files:
+        all_box_data.extend(file.read_text().strip("\n").split("\n"))
+    with open(large_box_file, "w", encoding="utf-8", newline="\n") as box_file:
+        box_file.write("\n".join(all_box_data) + "\n")
     c.run(
         "unicharset_extractor "
         f"--output_unicharset { unicharset_file } "
         "--norm_mode 3 "
-        f"{box_files} "
+        f"{large_box_file} "
     )
+    with c.cd(LANGDATA_LSTM_PATH):
+        c.run(
+            "set_unicharset_properties "
+            f"--U {unicharset_file} "
+            f"--O {unicharset_file} "
+            "--script_dir ."
+        )
     # Finally generate the starter trainneddata file
     wordlist_file = lang_langdata_lstm_dir / f"{ lang }.wordlist"
     numbers_file = lang_langdata_lstm_dir  / f"{lang}.numbers"
