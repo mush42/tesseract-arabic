@@ -1,7 +1,9 @@
 # coding: utf-8
 
 import unicodedata
+import random
 import os
+import io
 import shutil
 from itertools import chain
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +11,7 @@ from tempfile import TemporaryDirectory, NamedTemporaryFile
 from pathlib import Path
 from invoke import task
 from pathvalidate import sanitize_filename
+from . import utils
 
 
 ROOT = Path.cwd()
@@ -16,6 +19,7 @@ TRAINEDDATA_PATH = ROOT / "traineddata"
 TRAINING_FILES_PATH = ROOT / "training_files"
 STAGING_AREA = ROOT / "stage"
 OUTPUT_PATH = ROOT / "output"
+GENERATED_FILES_PATH = STAGING_AREA / "generated_files"
 LANGDATA_LSTM_PATH = TRAINEDDATA_PATH / "langdata_lstm"
 PRETRAINED_MODEL_EXTRACTION_PATH = STAGING_AREA / "extracted_pretrained_model"
 PROTO_MODEL_PATH = STAGING_AREA / "protomodel"
@@ -24,6 +28,57 @@ TEXT_CORPUS_PATH = TRAINING_FILES_PATH / "text_corpus"
 GENERATED_IMAGES_PLUS_TEXT_PATH = STAGING_AREA / "text_plus_images"
 LSTMF_PATH = STAGING_AREA / "lstmf"
 CHECKPOINT_OUTPUT_PATH = STAGING_AREA / "model_output_checkpoints"
+
+# Misc constants
+FONT_SIZES = tuple(range(10, 16))
+
+
+def make_generated_path(*parts, is_dir=False, lang=""):
+    newfile = GENERATED_FILES_PATH.joinpath(lang, *parts)
+    if is_dir:
+        newfile.mkdir(parents=True, exist_ok=True)
+    else:
+        newfile.parent.mkdir(parents=True, exist_ok=True)
+    return newfile
+
+
+
+def get_or_create_training_text(lang, space_separated):
+    if space_separated:
+        filename = make_generated_path("training.text.space.separated.txt", lang=lang)
+    else:
+        filename = make_generated_path("training.text.newline.separated.txt", lang=lang)
+    if not filename.exists():
+        text_plus_images_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
+        txt_files = text_plus_images_dir.glob("*.txt")
+        utils.combine_text_files(txt_files, output_file=filename, space_separated=space_separated)
+    return filename
+
+
+@task
+def lang_dict(c):
+    """Create a new dictionary for the language from the provided text."""
+    lang = c['tesseract']['lang']
+    text_corpus = get_or_create_training_text(lang, space_separated=False)
+    target_proto_dir = PROTO_MODEL_PATH / lang / lang
+    target_proto_dir.mkdir(parents=True, exist_ok=True)
+    c.run(
+        f"create_dictdata -l {lang} "
+        f"-i {text_corpus} "
+        f"-d {target_proto_dir}"
+    )
+    print(f"Generated dictionary from  text corpus for language {lang} at {target_proto_dir}")
+    # Copy specific files
+    special_files_src = LANGDATA_LSTM_PATH / lang
+    files_to_copy = {
+        f"{lang}.config",
+        "desired_characters",
+        "forbidden_characters",
+    }
+    for filename in files_to_copy:
+        src = special_files_src / filename
+        if src.exists():
+            shutil.copy(src, target_proto_dir)
 
 
 @task
@@ -79,22 +134,68 @@ def gen_images(c):
         for (idx, line) in enumerate(lines):
             outfilename = output_dir / f"{lang}.{filename}.{idx}.gt.txt"
             text = unicodedata.normalize('NFC', line)
-            outfilename.write_text(text)
+            outfilename.write_text(text + "\n")
     with TemporaryDirectory() as tempdir, c.cd(output_dir), ThreadPoolExecutor(max_workers=1) as executor:
         for txt_file in output_dir.glob("*.txt"):
             for fontname in fonts_list:
                 output_base = txt_file.stem.rstrip(".gt") + sanitize_filename(fontname).replace(" ", "")
+                ptsize = random.choice(FONT_SIZES)
                 executor.submit(
                     c.run,
                     "text2image "
-                    "--xsize 2400 --ysize 512 "
-                    "--margin 64 --ptsize 32 "
+                    "--xsize 2000  --ysize 320 "
+                    "--min_coverage .9 --distort_image --box_padding 48 "
+                    f"--margin 100 --ptsize {ptsize} "
                     f"--fontconfig_tmpdir {tempdir} "
                     f"--fonts_dir {fonts_dir} "
                     f"--text {txt_file} "
                     f'--font "{fontname}" '
                     f"--outputbase {output_base}"
                 )
+
+
+@task
+def fontinfo(c):
+    """Generate fontinfo for each font."""
+    lang = c['tesseract']['lang']
+    text_plus_images_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
+    fonts_dir = FONTS_PATH / lang
+    fonts_list = [
+        line.strip()
+        for line in (fonts_dir / "fonts.txt").read_text().split("\n")
+    ]
+    # Now write font properties for each font
+    print("Generating font properties file for each font...")
+    font_properties_dir = text_plus_images_dir / "font_properties"
+    font_properties_dir.mkdir(parents=True, exist_ok=True)
+    space_separated_txt = get_or_create_training_text(lang, space_separated=True)
+    with c.cd(font_properties_dir), TemporaryDirectory() as tempdir, NamedTemporaryFile() as outfile:
+        for fontname in fonts_list:
+            print(f"Generating a list of ngrams for font: {fontname}")
+            output_base = sanitize_filename(fontname.replace(" ", "_"))
+            c.run(
+                "text2image --render_ngrams "
+                "--ptsize 32 --ligatures false"
+                f"--fontconfig_tmpdir {tempdir} "
+                f"--fonts_dir {fonts_dir} "
+                f'--font "{fontname}" '
+                f"--text {space_separated_txt} "
+                f"--outputbase {output_base} "
+            )
+            print(f"Generating fontinfo from ngrams file for font: {fontname}")
+            ngrams_file = output_base + ".box"
+            c.run(
+                "text2image --only_extract_font_properties "
+                f"--fontconfig_tmpdir {tempdir} "
+                f"--fonts_dir {fonts_dir} "
+                f'--font "{fontname}" '
+                f"--text {ngrams_file} "
+                f"--outputbase {output_base} "
+            )
+    # Now copy the fontinfo files to the target folder
+    fontinfo_dir = make_generated_path("fontinfo", lang=lang, is_dir=True)
+    for finfo in font_properties_dir.glob("*.fontinfo"):
+        shutil.copy(finfo, fontinfo_dir)
 
 
 @task
@@ -128,7 +229,7 @@ def write_lstmf_files_list(c):
 
 
 @task
-def lstmf(c):
+def gen_lstmf(c):
     print("Generating lstmf files from images and box files...")
     lang = c['tesseract']['lang']
     image_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
@@ -140,18 +241,22 @@ def lstmf(c):
     with c.cd(image_dir), ThreadPoolExecutor(max_workers=8) as executor:
         for tif in tif_files:
             cmd = " ".join([
-                f"tesseract -l {lang} {tif.name}",
+                f"tesseract --psm 7 -l {lang} {tif.name}",
                f"{ tif.stem }",
                "lstm.train",
                f"{lang_config}",
             ])
             executor.submit(c.run, cmd)
-    # Move .lstmf files to the lstmf_dir
+
+
+@task
+def mv_lstmf(c):
+    """Moves lstmf files to the target folder."""
+    lang = c['tesseract']['lang']
+    image_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
+    lstmf_dir = LSTMF_PATH / lang
     for lstm_file in image_dir.glob("*.lstmf"):
         shutil.move(lstm_file, lstmf_dir)
-
-
-
 
 
 @task
@@ -164,23 +269,27 @@ def proto(c):
     proto_model_dir.mkdir(parents=True, exist_ok=True)
     lang_langdata_lstm_dir = LANGDATA_LSTM_PATH / lang
     # First generate unicharset file
-    box_files = text_plus_images_dir.glob("*.box")
+    text_corpus = get_or_create_training_text(lang, space_separated=False)
     unicharset_file = proto_model_dir / f"{lang}.unicharset"
-    large_box_file = proto_model_dir / f"{lang}.box"
-    all_box_data = []
-    for file in box_files:
-        all_box_data.extend(file.read_text().strip("\n").split("\n"))
-    with open(large_box_file, "w", encoding="utf-8", newline="\n") as box_file:
-        box_file.write("\n".join(all_box_data) + "\n")
     c.run(
         "unicharset_extractor "
         f"--output_unicharset { unicharset_file } "
         "--norm_mode 3 "
-        f"{large_box_file} "
+        f"{text_corpus} "
     )
+    # Merge it with the original unicharset file
+    original_unicharset = LANGDATA_LSTM_PATH / lang / f"{lang}.unicharset"
+    c.run(
+        f"merge_unicharsets "
+        f"{original_unicharset} "
+        f"{unicharset_file} "
+        f"{unicharset_file}"
+    )
+    lang_config_file = lang_langdata_lstm_dir / f"{ lang }.config"
     with c.cd(LANGDATA_LSTM_PATH):
         c.run(
             "set_unicharset_properties "
+            f"--configfile {lang_config_file} "
             f"--U {unicharset_file} "
             f"--O {unicharset_file} "
             "--script_dir ."
@@ -264,3 +373,24 @@ def done(c, fast_model=False):
     c.run(" ".join(cmd))
     print(f"Done creating the new language model.\nSaved the model as: {output_model}")
 
+
+@task
+def evaluate(c):
+    """Shows the results of lstmeval for the old and the new finetune model."""
+    lang = c['tesseract']['lang']
+    lstmf_dir = LSTMF_PATH / lang
+    lstmf_file_list =     lstmf_dir / "training.files.txt"
+    original_model = TRAINEDDATA_PATH / f"{lang}.traineddata"
+    finetuned_model = OUTPUT_PATH / f"{lang}.traineddata"
+    if not finetuned_model.exists():
+        return print("Finetuned model was not found. Exiting...")
+    cmd = " ".join([
+        "lstmeval",
+        f"--eval_listfile {lstmf_file_list}",
+        "--model {model}",
+        "--verbosity 0",
+    ])
+    print("Metrics for the old model")
+    result = c.run(cmd.format(model=original_model))
+    print("Metrics for the fine-tuned model")
+    c.run(cmd.format(model=finetuned_model))
