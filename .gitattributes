@@ -2,4 +2,4 @@
 * text=auto
 
 # Tesseract training should be checked out as is
-traineddata/ binary
+traineddata/* binary
