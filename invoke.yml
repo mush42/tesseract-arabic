@@ -1,4 +1,6 @@
 tesseract:
   lang: ara
+  extract_wordlist: false
   is_rtl: true
+  unicharset_norm_mode: 3
   new_model: false

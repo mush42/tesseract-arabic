@@ -9,6 +9,7 @@ from itertools import chain
 from concurrent.futures import ThreadPoolExecutor
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 from pathlib import Path
+from more_itertools import chunked
 from invoke import task
 from pathvalidate import sanitize_filename
 from . import utils
@@ -55,9 +56,42 @@ def get_or_create_training_text(lang, space_separated):
     return filename
 
 
+def generate_unicharset_from_box_files(c, output_file, box_files, box_dir, gen_func):
+    """Generate unicharset from a list of box files."""
+    all_boxes = [bf.name for bf in box_files]
+    if sum(len(filename) for filename in all_boxes) < 8000:
+        with c.cd(box_dir):
+            gen_func(
+                output_file,
+                " ".join(all_boxes),
+            )
+        return
+    # We need to chunk to avoid the 4k command limit on Windows
+    chunks = chunked(all_boxes, n=100)
+    temp_output_dir = make_generated_path("gen_unicharsets", lang=c["tesseract"]["lang"], is_dir=True)
+    for (idx, chunk) in enumerate(chunks):
+        temp_out_unicharset = temp_output_dir / f"{idx}.unicharset"
+        with c.cd(box_dir):
+            gen_func(
+                temp_out_unicharset,
+                " ".join(chunk),
+            )
+    # Now merge the generated files
+    files_to_merge = " ".join(unfile.name for unfile in temp_output_dir.glob("*.unicharset"))
+    with c.cd(temp_output_dir):
+        c.run(
+            "merge_unicharsets "
+            f"{files_to_merge} "
+            f"{output_file} "
+        )
+
+
 @task
-def lang_dict(c):
+def lang_dict(c, force=False):
     """Create a new dictionary for the language from the provided text."""
+    if not c['tesseract']['new_model']:
+        print("Not creating a new model. Skipping language dictionary generation...")
+        return
     lang = c['tesseract']['lang']
     text_corpus = get_or_create_training_text(lang, space_separated=False)
     target_proto_dir = PROTO_MODEL_PATH / lang / lang
@@ -260,6 +294,59 @@ def mv_lstmf(c):
 
 
 @task
+def gen_unicharset(c, from_box=True):
+    """Generates unicharset from box or plain text files."""
+    lang = c['tesseract']['lang']
+    text_plus_images_dir = GENERATED_IMAGES_PLUS_TEXT_PATH / lang
+    extracted_model_directory = PRETRAINED_MODEL_EXTRACTION_PATH / lang
+    proto_model_dir = PROTO_MODEL_PATH / lang
+    proto_model_dir.mkdir(parents=True, exist_ok=True)
+    lang_langdata_lstm_dir = LANGDATA_LSTM_PATH / lang
+    final_unicharset_file = proto_model_dir / f"{lang}.unicharset"
+    unicharset_norm_mode = c["tesseract"]["unicharset_norm_mode"]
+    # First generate unicharset file
+
+    def do_gen_unicharset(output_file, input_files):
+        c.run(
+            "unicharset_extractor "
+            f"--output_unicharset { output_file } "
+            f"--norm_mode {unicharset_norm_mode} "
+            f"{input_files} ",
+            hide=True
+        )
+
+    if from_box:
+        box_files = tuple(text_plus_images_dir.glob("*.box"))
+        generate_unicharset_from_box_files(
+            c,
+            output_file=final_unicharset_file,
+            box_files=box_files,
+            box_dir=text_plus_images_dir,
+            gen_func=do_gen_unicharset
+        )
+    else:
+        input_files = get_or_create_training_text(lang, space_separated=False)
+        do_gen_unicharset(final_unicharset_file, input_files)
+    # Merge the generated unicharset with the original unicharset file
+    original_unicharset = LANGDATA_LSTM_PATH / lang / f"{lang}.unicharset"
+    c.run(
+        f"merge_unicharsets "
+        f"{original_unicharset} "
+        f"{final_unicharset_file} "
+        f"{final_unicharset_file}"
+    )
+    lang_config_file = lang_langdata_lstm_dir / f"{ lang }.config"
+    with c.cd(LANGDATA_LSTM_PATH):
+        c.run(
+            "set_unicharset_properties "
+            f"--configfile {lang_config_file} "
+            f"--U {final_unicharset_file} "
+            f"--O {final_unicharset_file} "
+            "--script_dir ."
+        )
+
+
+@task
 def proto(c):
     """Generates proto model."""
     lang = c['tesseract']['lang']
@@ -268,34 +355,13 @@ def proto(c):
     proto_model_dir = PROTO_MODEL_PATH / lang
     proto_model_dir.mkdir(parents=True, exist_ok=True)
     lang_langdata_lstm_dir = LANGDATA_LSTM_PATH / lang
-    # First generate unicharset file
-    text_corpus = get_or_create_training_text(lang, space_separated=False)
     unicharset_file = proto_model_dir / f"{lang}.unicharset"
-    c.run(
-        "unicharset_extractor "
-        f"--output_unicharset { unicharset_file } "
-        "--norm_mode 3 "
-        f"{text_corpus} "
-    )
-    # Merge it with the original unicharset file
-    original_unicharset = LANGDATA_LSTM_PATH / lang / f"{lang}.unicharset"
-    c.run(
-        f"merge_unicharsets "
-        f"{original_unicharset} "
-        f"{unicharset_file} "
-        f"{unicharset_file}"
-    )
-    lang_config_file = lang_langdata_lstm_dir / f"{ lang }.config"
-    with c.cd(LANGDATA_LSTM_PATH):
-        c.run(
-            "set_unicharset_properties "
-            f"--configfile {lang_config_file} "
-            f"--U {unicharset_file} "
-            f"--O {unicharset_file} "
-            "--script_dir ."
-        )
+    is_new_model = c["tesseract"]["new_model"]
     # Finally generate the starter trainneddata file
-    wordlist_file = lang_langdata_lstm_dir / f"{ lang }.wordlist"
+    if is_new_model or c['tesseract']['extract_wordlist']:
+        wordlist_file = proto_model_dir / lang / f"{lang}.wordlist"
+    else:
+        wordlist_file = lang_langdata_lstm_dir / f"{ lang }.wordlist"
     numbers_file = lang_langdata_lstm_dir  / f"{lang}.numbers"
     puncs_file = lang_langdata_lstm_dir  / f"{lang}.punc"
     cmd_components = [
@@ -394,3 +460,24 @@ def evaluate(c):
     result = c.run(cmd.format(model=original_model))
     print("Metrics for the fine-tuned model")
     c.run(cmd.format(model=finetuned_model))
+
+
+@task(name="import")
+def import_files(c, from_dir, recurs=False):
+    """Import box and lstmf files from a folder."""
+    lang = c['tesseract']['lang']
+    src_dir = Path(from_dir)
+    if not src_dir.exists():
+        return print(f"Folder {src_dir} not found. Exiting...")
+    globber = Path.rglob if recurs else Path.glob
+    task_info = [
+        ("*.box", GENERATED_IMAGES_PLUS_TEXT_PATH / lang),
+        ("*.gt.txt", GENERATED_IMAGES_PLUS_TEXT_PATH / lang),
+        ("*.lstmf", LSTMF_PATH / lang),
+    ]
+    for ext, dst in task_info:
+        print(f"Copying {ext} files from source ")
+        dst.mkdir(parents=True, exist_ok=True)
+        for file in globber(src_dir, ext):
+            shutil.copy(file, dst)
+    print("Done importing the data.")
