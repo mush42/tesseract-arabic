@@ -82,7 +82,8 @@ def generate_unicharset_from_box_files(c, output_file, box_files, box_dir, gen_f
         c.run(
             "merge_unicharsets "
             f"{files_to_merge} "
-            f"{output_file} "
+            f"{output_file} ",
+            hide=True
         )
 
 
