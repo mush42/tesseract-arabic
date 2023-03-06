@@ -153,14 +153,14 @@ def gen_images(c):
     fonts_dir = FONTS_PATH / lang
     fonts_list = [
         line.strip()
-        for line in (fonts_dir / "fonts.txt").read_text().split("\n")
+        for line in (fonts_dir / "fonts.txt").read_text(encoding="utf-8").split("\n")
     ]
     texts_dir = TEXT_CORPUS_PATH / lang
     text_files = texts_dir.glob("*.txt")
     text_lines = {
         file.stem.strip(): {
             stripped_line
-            for line in file.read_text().split("\n")
+            for line in file.read_text(encoding="utf-8").split("\n")
             if (stripped_line := line.strip())
         }
         for file in text_files
@@ -169,7 +169,7 @@ def gen_images(c):
         for (idx, line) in enumerate(lines):
             outfilename = output_dir / f"{lang}.{filename}.{idx}.gt.txt"
             text = unicodedata.normalize('NFC', line)
-            outfilename.write_text(text + "\n")
+            outfilename.write_text(text + "\n", encoding="utf-8")
     with TemporaryDirectory() as tempdir, c.cd(output_dir), ThreadPoolExecutor(max_workers=1) as executor:
         for txt_file in output_dir.glob("*.txt"):
             for fontname in fonts_list:
@@ -197,7 +197,7 @@ def fontinfo(c):
     fonts_dir = FONTS_PATH / lang
     fonts_list = [
         line.strip()
-        for line in (fonts_dir / "fonts.txt").read_text().split("\n")
+        for line in (fonts_dir / "fonts.txt").read_text(encoding="utf-8").split("\n")
     ]
     # Now write font properties for each font
     print("Generating font properties file for each font...")
@@ -258,7 +258,7 @@ def write_lstmf_files_list(c):
     lstmf_dir = LSTMF_PATH / lang
     lstmf_file_list = "\n".join(str(f.resolve()) for f in lstmf_dir.iterdir())
     print(f"Writing the list of training files to: {lstmf_dir}...")
-    with open(lstmf_dir / "training.files.txt", "w", newline="\n") as file:
+    with open(lstmf_dir / "training.files.txt", "w", newline="\n", encoding="utf-8") as file:
         file.write(lstmf_file_list)
 
 

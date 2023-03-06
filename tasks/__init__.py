@@ -23,8 +23,8 @@ ns.add_task(training_tasks.evaluate)
     training_tasks.mv_lstmf,
     training_tasks.write_lstmf_files_list,
 ])
-def train(c, *args, **kwargs):
-    return training_tasks.train(c, *args, **kwargs)
+def train(c, cont=False):
+    return training_tasks.train(c, cont=cont)
 
 
 @ns.add_task
